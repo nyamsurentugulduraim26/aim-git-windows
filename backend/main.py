@@ -6,15 +6,15 @@ import json
 import re
 from datetime import datetime
 
-# 1. Тохиргоо болон Орчин
+# API Key тохиргоо
 genai.configure(api_key=os.environ.get("OPENAI_API_KEY"))
 app = FastAPI()
 
-# Өгөгдөл хадгалах хавтас болон файлын зам
-DATA_FOLDER = "data"
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_FOLDER = os.path.join(BASE_DIR, "data")
 DB_FILE = os.path.join(DATA_FOLDER, "inquiries.json")
 
-# Хавтас байхгүй бол үүсгэх
 if not os.path.exists(DATA_FOLDER):
     os.makedirs(DATA_FOLDER)
 
@@ -29,18 +29,15 @@ CATEGORY_LIST = [
     "セキュリティ", "個人情報", "その他"
 ]
 
-# 2. Туслах функц: JSON хадгалах
 def save_to_json(data):
-    # Файл байхгүй бол хоосон жагсаалттай үүсгэх
-    if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f)
-
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        try:
-            items = json.load(f)
-        except json.JSONDecodeError:
-            items = []
+    """Өгөгдлийг JSON файлд хадгалах"""
+    items = []
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            try:
+                items = json.load(f)
+            except json.JSONDecodeError:
+                items = []
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     items.append(data)
@@ -48,10 +45,21 @@ def save_to_json(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=4)
 
-# 3. API Замууд
 @app.get("/")
 def root():
     return {"message": "API is running"}
+
+@app.get("/history")
+def get_history():
+    """Frontend-д зориулж түүхийг уншиж буцаах (Энэ хэсэг дутуу байсан)"""
+    if not os.path.exists(DB_FILE):
+        return []
+    
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
 
 @app.post("/analyze")
 async def analyze_inquiry(request: InquiryRequest):
@@ -64,7 +72,7 @@ async def analyze_inquiry(request: InquiryRequest):
     1. カテゴリは必ず以下のリストから最も適切なものを1つ選択してください：
        [{categories_str}]
     2. 緊急度（priority）は「低」「中」「高」「緊急」の4段階から選択してください。
-    3. 回案（answer）は、総務担当者として丁寧で親切な日本語で作成してください。
+    3. 回答案（answer）は、総務担当者として丁寧で親切な日本語で作成してください。
     4. 出力は必ず以下のJSON形式のみとし、他のテキストは含めないでください：
        {{
            "category": "選択したカテゴリ",
@@ -77,8 +85,7 @@ async def analyze_inquiry(request: InquiryRequest):
     """
 
     try:
-        # Gemini 1.5 Flash ашиглах (2.5 хувилбар байхгүй тул засварлав)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash') 
         response = model.generate_content(prompt)
         response_text = response.text.strip()
         
@@ -95,9 +102,7 @@ async def analyze_inquiry(request: InquiryRequest):
             "answer": ai_data.get("answer", "AI回答の生成に失敗しました。")
         }
 
-        # JSON файлд түүхийг хадгалах[cite: 1]
         save_to_json(result)
-
         return result
 
     except Exception as e:
@@ -108,11 +113,3 @@ async def analyze_inquiry(request: InquiryRequest):
             "priority": "緊急",
             "answer": f"AI分析中にエラーが発生しました: {str(e)}"
         }
-
-# Боломжит моделуудыг шалгах
-try:
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            print(f"Боломжит модел: {m.name}")
-except Exception as e:
-    print(f"Could not list models: {e}")
