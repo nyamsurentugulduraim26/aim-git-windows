@@ -1,81 +1,116 @@
-import os
-import json
-from datetime import datetime
-from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from datetime import datetime
+import os
+import google.generativeai as genai
 from dotenv import load_dotenv
-from google import genai
 
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+from backend.storage import load_data, save_data
 
+# =========================
+# INIT
+# =========================
 app = FastAPI()
+load_dotenv()
 
-DATA_PATH = Path("data/inquiries.json")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-1.5-flash")
 
+
+# =========================
+# MODEL
+# =========================
 class InquiryRequest(BaseModel):
     question: str
 
-def load_inquiries():
-    if not DATA_PATH.exists():
-        return []
-    with DATA_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
 
-def save_inquiry(question, category, priority, answer):
-    inquiries = load_inquiries()
-    new_id = len(inquiries) + 1
-    item = {
-        "id": new_id,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "question": question,
-        "category": category,
-        "priority": priority,
-        "answer": answer,
-    }
-    inquiries.append(item)
-    DATA_PATH.parent.mkdir(exist_ok=True)
-    with DATA_PATH.open("w", encoding="utf-8") as f:
-        json.dump(inquiries, f, ensure_ascii=False, indent=2)
-    return item
+# =========================
+# GEMINI CALL
+# =========================
+def call_gemini(question: str):
 
-def analyze_with_gemini(question: str) -> str:
     prompt = f"""
-あなたは総務部門の問い合わせ一次回答担当です。
-社員からの問い合わせを読み、以下の3点を日本語で返してください。
+あなたは社内問い合わせAIです。
 
-1. カテゴリ:
-2. 緊急度:（高・中・低）
-3. 回答案:
+必ずJSONのみ返してください：
 
-問い合わせ:
+{{
+  "category": "勤怠/休暇/給与/経費精算/社員情報変更/その他",
+  "urgency": "高/中/低",
+  "answer": "簡潔な回答"
+}}
+
+問い合わせ：
 {question}
 """
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt
-    )
+
+    response = model.generate_content(prompt)
     return response.text
 
-@app.get("/")
-def root():
-    return {"message": "API is running"}
 
+# =========================
+# SAFE JSON PARSE
+# =========================
+import json
+
+def parse_json(text: str):
+
+    try:
+        return json.loads(text)
+    except:
+        clean = text.replace("```json", "").replace("```", "")
+        return json.loads(clean)
+
+
+# =========================
+# POST
+# =========================
+@app.post("/inquiries")
+def create_inquiry(req: InquiryRequest):
+
+    try:
+        raw = call_gemini(req.question)
+        result = parse_json(raw)
+
+    except Exception:
+        raise HTTPException(status_code=500, detail="Gemini Error")
+
+    data = load_data()
+
+    new_item = {
+        "id": len(data) + 1,
+        "created_at": datetime.now().isoformat(),
+        "question": req.question,
+        "category": result["category"],
+        "urgency": result["urgency"],
+        "answer": result["answer"]
+    }
+
+    data.append(new_item)
+    save_data(data)
+
+    return new_item
+
+
+# =========================
+# GET ALL
+# =========================
 @app.get("/inquiries")
-def get_inquiries():
-    return load_inquiries()
+def get_all():
+    data = load_data()
+    return sorted(data, key=lambda x: x["id"], reverse=True)
 
-@app.post("/analyze")
-def analyze_inquiry(request: InquiryRequest):
-    gemini_response = analyze_with_gemini(request.question)
-    
-    item = save_inquiry(
-        question=request.question,
-        category="未分類", 
-        priority="不明",   
-        answer=gemini_response
-    )
-    
-    return item
+
+# =========================
+# GET ONE
+# =========================
+@app.get("/inquiries/{id}")
+def get_one(id: int):
+
+    data = load_data()
+
+    for item in data:
+        if item["id"] == id:
+            return item
+
+    raise HTTPException(status_code=404, detail="Not found")
